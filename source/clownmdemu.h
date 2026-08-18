@@ -106,6 +106,22 @@ typedef enum ClownMDEmu_CDDAMode
 	CLOWNMDEMU_CDDA_PLAY_REPEAT
 } ClownMDEmu_CDDAMode;
 
+/* TODO: Move this (and the other CDD logic) to its own 'cdd.c'/'cdd.h' file. */
+typedef struct ClownMDEmu_MCDCDDState
+{
+	cc_u8l status;
+	cc_u8l current_track;
+	cc_u8l current_m;
+	cc_u8l current_s;
+	cc_u8l current_f;
+	cc_u8l first_track;
+	cc_u8l last_track;
+	cc_u8l lead_out_m;
+	cc_u8l lead_out_s;
+	cc_u8l lead_out_f;
+	cc_bool loaded;
+} ClownMDEmu_MCDCDDState;
+
 typedef struct ClownMDEmu_Configuration
 {
 	ClownMDEmu_Region region;
@@ -209,6 +225,7 @@ typedef struct ClownMDEmu_State
 
 		cc_bool cd_inserted;
 		cc_u16l hblank_address;
+		cc_u16l stop_watch;
 		cc_u16l delayed_dma_word;
 	} mega_cd;
 
@@ -275,6 +292,7 @@ typedef struct ClownMDEmu
 		CDC_State cdc;
 		CDDA cdda;
 		PCM pcm;
+		ClownMDEmu_MCDCDDState cdd;
 	} mega_cd;
 
 	ClownMDEmu_Configuration configuration;
