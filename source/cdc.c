@@ -107,6 +107,7 @@ cc_bool CDC_Stat(CDC_State* const state, const CDC_SectorReadCallback callback, 
 {
 	/* Sonic CD relies on a delay to play audio during its FMVs. */
 	/* TODO: Emulate this delay properly, without a giant hack. */
+	/* TODO: Apparently Shin Migami Tensei is broken by this. */
 	state->hack_counter = (state->hack_counter + 1) % 6;
 
 	if (state->hack_counter < 2)
