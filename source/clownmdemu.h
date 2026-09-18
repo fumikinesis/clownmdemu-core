@@ -154,6 +154,7 @@ typedef struct ClownMDEmu_DebugStepResult
 {
 	ClownMDEmu_DebugStepStatus status;
 	cc_u32l master_cycles;
+	cc_u32l frames_completed;
 } ClownMDEmu_DebugStepResult;
 
 /* TODO: Move this (and the other CDD logic) to its own 'cdd.c'/'cdd.h' file. */
@@ -290,6 +291,22 @@ typedef struct ClownMDEmu_State
 	{
 		Sync_State m68k, mcd_m68k;
 	} sync;
+
+	/* Persistent only while debugger instruction stepping is inside a frame.
+	   Keeping this in save-state makes stepping resumable after load-state. */
+	struct
+	{
+		cc_bool active;
+		cc_s16l scanline;
+		cc_u8l phase;
+		cc_u8l h_int_counter;
+		cc_u16l television_vertical_resolution;
+		cc_u16l console_vertical_resolution;
+		cc_u16l cycles_per_scanline;
+		cc_u32l cycles_per_frame;
+		cc_u32l elapsed_cycles;
+		cc_u32l cycles_until_event;
+	} debug_raster;
 } ClownMDEmu_State;
 
 struct ClownMDEmu;
@@ -328,6 +345,7 @@ typedef struct ClownMDEmu_Callbacks
 	void (*debug_instruction)(void *user_data, ClownMDEmu_DebugCPU cpu, ClownMDEmu_DebugInstructionPhase phase, cc_u32f pc, cc_u32f next_pc, cc_u32f cycle);
 	void (*debug_memory_access)(void *user_data, ClownMDEmu_DebugCPU cpu, ClownMDEmu_DebugMemoryAccess access, cc_u32f address, cc_u8f width, cc_u32f value, cc_u32f cycle);
 	void (*debug_hardware_write)(void *user_data, ClownMDEmu_DebugCPU cpu, ClownMDEmu_DebugHardwareTarget target, cc_u32f address, cc_u8f width, cc_u32f value, cc_u32f cycle);
+	void (*debug_frame_boundary)(void *user_data);
 } ClownMDEmu_Callbacks;
 
 typedef struct ClownMDEmu

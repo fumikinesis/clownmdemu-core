@@ -157,6 +157,17 @@ static void ClownMDEmu_State_Initialise(ClownMDEmu* const clownmdemu)
 
 	Sync_State_Initialise(&clownmdemu->state.sync.m68k);
 	Sync_State_Initialise(&clownmdemu->state.sync.mcd_m68k);
+
+	clownmdemu->state.debug_raster.active = cc_false;
+	clownmdemu->state.debug_raster.scanline = 0;
+	clownmdemu->state.debug_raster.phase = 0;
+	clownmdemu->state.debug_raster.h_int_counter = 0;
+	clownmdemu->state.debug_raster.television_vertical_resolution = 0;
+	clownmdemu->state.debug_raster.console_vertical_resolution = 0;
+	clownmdemu->state.debug_raster.cycles_per_scanline = 0;
+	clownmdemu->state.debug_raster.cycles_per_frame = 0;
+	clownmdemu->state.debug_raster.elapsed_cycles = 0;
+	clownmdemu->state.debug_raster.cycles_until_event = 0;
 }
 
 void ClownMDEmu_Initialise(ClownMDEmu* const clownmdemu, const ClownMDEmu_InitialConfiguration* const configuration, const ClownMDEmu_Callbacks* const callbacks)
@@ -266,10 +277,41 @@ static void InitialiseCPUCallbackUserData(ClownMDEmu* const clownmdemu, CPUCallb
 		cpu_callback_user_data->sync.io_ports[i].current_cycle = 0;
 }
 
+enum
+{
+	DEBUG_RASTER_LINE_START,
+	DEBUG_RASTER_ACTIVE_MIDPOINT,
+	DEBUG_RASTER_LINE_END,
+	DEBUG_RASTER_FRAME_TAIL
+};
+
+static void InitialiseDebugCPUCallbackUserData(
+	ClownMDEmu* const clownmdemu,
+	CPUCallbackUserData* const cpu_callback_user_data,
+	const cc_u32f frame_cycle)
+{
+	InitialiseCPUCallbackUserData(clownmdemu, cpu_callback_user_data);
+
+	cpu_callback_user_data->sync.m68k.current_cycle = frame_cycle;
+	cpu_callback_user_data->sync.z80.current_cycle = frame_cycle;
+	cpu_callback_user_data->sync.fm.current_cycle =
+		frame_cycle / CLOWNMDEMU_M68K_CLOCK_DIVIDER;
+	cpu_callback_user_data->sync.psg.current_cycle =
+		frame_cycle / (CLOWNMDEMU_Z80_CLOCK_DIVIDER * CLOWNMDEMU_PSG_SAMPLE_RATE_DIVIDER);
+
+	{
+		cc_u8f i;
+		for (i = 0; i < CC_COUNT_OF(cpu_callback_user_data->sync.io_ports); ++i)
+			cpu_callback_user_data->sync.io_ports[i].current_cycle =
+				frame_cycle / (CLOWNMDEMU_MASTER_CLOCK_NTSC / 1000000);
+	}
+}
+
 static void SyncDebugStepDevices(CPUCallbackUserData* const cpu_callback_user_data, const CycleMegaDrive target_cycle)
 {
 	cc_u8f i;
 
+	SyncM68k(cpu_callback_user_data->clownmdemu, cpu_callback_user_data, target_cycle);
 	SyncZ80(cpu_callback_user_data->clownmdemu, cpu_callback_user_data, target_cycle);
 	SyncFM(cpu_callback_user_data, target_cycle);
 	SyncPSG(cpu_callback_user_data, target_cycle);
@@ -277,21 +319,295 @@ static void SyncDebugStepDevices(CPUCallbackUserData* const cpu_callback_user_da
 		SyncIOPort(cpu_callback_user_data, target_cycle, i);
 }
 
+static void DebugRasterInitialiseFrame(ClownMDEmu* const clownmdemu)
+{
+	ClownMDEmu_State* const state = &clownmdemu->state;
+	const CycleMegaDrive cycles_per_frame = GetMegaDriveCyclesPerFrame(clownmdemu);
+
+	state->debug_raster.active = cc_true;
+	state->debug_raster.television_vertical_resolution = GetTelevisionVerticalResolution(clownmdemu);
+	state->debug_raster.console_vertical_resolution =
+		VDP_GetScreenHeightInTiles(&clownmdemu->vdp.state) * VDP_STANDARD_TILE_HEIGHT;
+	state->debug_raster.cycles_per_frame = cycles_per_frame.cycle;
+	state->debug_raster.cycles_per_scanline =
+		cycles_per_frame.cycle / state->debug_raster.television_vertical_resolution;
+	state->debug_raster.elapsed_cycles = 0;
+	state->debug_raster.scanline = state->debug_raster.console_vertical_resolution;
+	state->debug_raster.phase = DEBUG_RASTER_LINE_START;
+	state->debug_raster.cycles_until_event = 0;
+}
+
+static cc_bool DebugRasterFinishFrame(
+	ClownMDEmu* const clownmdemu,
+	CPUCallbackUserData* const cpu_callback_user_data)
+{
+	ClownMDEmu_State* const state = &clownmdemu->state;
+	const CycleMegaCD cycles_per_frame_mega_cd = MakeCycleMegaCD(
+		clownmdemu->configuration.tv_standard == CLOWNMDEMU_TV_STANDARD_PAL
+			? CLOWNMDEMU_DIVIDE_BY_PAL_FRAMERATE(CLOWNMDEMU_MCD_MASTER_CLOCK)
+			: CLOWNMDEMU_DIVIDE_BY_NTSC_FRAMERATE(CLOWNMDEMU_MCD_MASTER_CLOCK));
+
+	SyncMCDM68k(clownmdemu, cpu_callback_user_data, cycles_per_frame_mega_cd);
+	SyncPCM(cpu_callback_user_data, cycles_per_frame_mega_cd);
+	SyncCDDA(
+		cpu_callback_user_data,
+		clownmdemu->configuration.tv_standard == CLOWNMDEMU_TV_STANDARD_PAL
+			? CLOWNMDEMU_DIVIDE_BY_PAL_FRAMERATE(44100)
+			: CLOWNMDEMU_DIVIDE_BY_NTSC_FRAMERATE(44100));
+
+	if (state->mega_cd.irq.irq1_pending)
+	{
+		state->mega_cd.irq.irq1_pending = cc_false;
+		Clown68000_Interrupt(&clownmdemu->mega_cd.m68k, 1);
+	}
+
+	CDDA_UpdateFade(&clownmdemu->mega_cd.cdda);
+
+	if (clownmdemu->callbacks->debug_frame_boundary != NULL)
+		clownmdemu->callbacks->debug_frame_boundary((void*)clownmdemu->callbacks->user_data);
+
+	state->debug_raster.active = cc_false;
+	state->debug_raster.scanline = 0;
+	state->debug_raster.phase = 0;
+	state->debug_raster.h_int_counter = 0;
+	state->debug_raster.television_vertical_resolution = 0;
+	state->debug_raster.console_vertical_resolution = 0;
+	state->debug_raster.cycles_per_scanline = 0;
+	state->debug_raster.cycles_per_frame = 0;
+	state->debug_raster.elapsed_cycles = 0;
+	state->debug_raster.cycles_until_event = 0;
+	return cc_true;
+}
+
+static cc_bool DebugRasterProcessEvent(
+	ClownMDEmu* const clownmdemu,
+	CPUCallbackUserData* const cpu_callback_user_data)
+{
+	ClownMDEmu_State* const state = &clownmdemu->state;
+	const cc_s16f console_vertical_resolution =
+		(cc_s16f)state->debug_raster.console_vertical_resolution;
+	const cc_s16f television_vertical_resolution =
+		(cc_s16f)state->debug_raster.television_vertical_resolution;
+	const cc_s8f bottom_border =
+		(television_vertical_resolution - console_vertical_resolution
+			- VDP_LINES_BOTTOM_BLANKING - VDP_LINES_VERTICAL_SYNC
+			- VDP_LINES_TOP_BLANKING) / 8 * 4;
+	const cc_s16f scanline = (cc_s16f)state->debug_raster.scanline;
+
+	switch (state->debug_raster.phase)
+	{
+		case DEBUG_RASTER_LINE_START:
+			state->current_scanline = scanline;
+
+			if (scanline >= 0 && scanline < console_vertical_resolution)
+			{
+				VDP_BeginScanline(&clownmdemu->vdp);
+				state->debug_raster.phase = DEBUG_RASTER_ACTIVE_MIDPOINT;
+				state->debug_raster.cycles_until_event =
+					state->debug_raster.cycles_per_scanline / 2;
+			}
+			else
+			{
+				if (scanline == -1)
+				{
+					clownmdemu->vdp.state.currently_in_vblank = cc_false;
+					state->debug_raster.h_int_counter = clownmdemu->vdp.state.h_int_interval;
+				}
+				else if (scanline == console_vertical_resolution)
+				{
+					clownmdemu->vdp.state.currently_in_vblank = cc_true;
+					state->m68k.v_int_pending = cc_true;
+					RaiseInterruptIfNeeded(clownmdemu);
+					ClownZ80_Interrupt(&clownmdemu->z80, cc_true);
+				}
+				else if (scanline == console_vertical_resolution + 1)
+				{
+					ClownZ80_Interrupt(&clownmdemu->z80, cc_false);
+				}
+
+				state->debug_raster.phase = DEBUG_RASTER_LINE_END;
+				state->debug_raster.cycles_until_event =
+					state->debug_raster.cycles_per_scanline;
+			}
+			break;
+
+		case DEBUG_RASTER_ACTIVE_MIDPOINT:
+			if (clownmdemu->vdp.state.double_resolution_enabled)
+			{
+				VDP_EndScanline(
+					&clownmdemu->vdp,
+					scanline * 2 + 0,
+					clownmdemu->callbacks->scanline_rendered,
+					clownmdemu->callbacks->user_data);
+				VDP_EndScanline(
+					&clownmdemu->vdp,
+					scanline * 2 + 1,
+					clownmdemu->callbacks->scanline_rendered,
+					clownmdemu->callbacks->user_data);
+			}
+			else
+			{
+				VDP_EndScanline(
+					&clownmdemu->vdp,
+					scanline,
+					clownmdemu->callbacks->scanline_rendered,
+					clownmdemu->callbacks->user_data);
+			}
+
+			state->debug_raster.phase = DEBUG_RASTER_LINE_END;
+			/* Match ClownMDEmu_Iterate exactly: both active-display halves use
+			   integer division, with any odd-cycle remainder caught by frame tail. */
+			state->debug_raster.cycles_until_event =
+				state->debug_raster.cycles_per_scanline / 2;
+			break;
+
+		case DEBUG_RASTER_LINE_END:
+			if (scanline >= -1 && scanline < console_vertical_resolution)
+			{
+				if (state->debug_raster.h_int_counter-- == 0)
+				{
+					state->debug_raster.h_int_counter = clownmdemu->vdp.state.h_int_interval;
+					state->m68k.h_int_pending = cc_true;
+					RaiseInterruptIfNeeded(clownmdemu);
+				}
+			}
+
+			++state->mega_cd.stop_watch;
+			++state->debug_raster.scanline;
+
+			if (state->debug_raster.scanline
+				== console_vertical_resolution + bottom_border + VDP_LINES_BOTTOM_BLANKING)
+			{
+				state->debug_raster.scanline =
+					-(television_vertical_resolution - console_vertical_resolution
+						- VDP_LINES_BOTTOM_BLANKING - bottom_border);
+			}
+
+			if (state->debug_raster.scanline == console_vertical_resolution)
+			{
+				state->debug_raster.phase = DEBUG_RASTER_FRAME_TAIL;
+				state->debug_raster.cycles_until_event =
+					state->debug_raster.cycles_per_frame - state->debug_raster.elapsed_cycles;
+			}
+			else
+			{
+				state->debug_raster.phase = DEBUG_RASTER_LINE_START;
+				state->debug_raster.cycles_until_event = 0;
+			}
+			break;
+
+		case DEBUG_RASTER_FRAME_TAIL:
+			return DebugRasterFinishFrame(clownmdemu, cpu_callback_user_data);
+	}
+
+	return cc_false;
+}
+
+static cc_u32f DebugRasterAdvanceCycles(
+	ClownMDEmu* const clownmdemu,
+	const cc_u32f total_cycles,
+	cc_u32f* const frames_completed)
+{
+	ClownMDEmu_State* const state = &clownmdemu->state;
+	CPUCallbackUserData cpu_callback_user_data;
+	cc_u32f remaining = total_cycles;
+
+	*frames_completed = 0;
+
+	if (!state->debug_raster.active)
+		DebugRasterInitialiseFrame(clownmdemu);
+
+	InitialiseDebugCPUCallbackUserData(
+		clownmdemu,
+		&cpu_callback_user_data,
+		state->debug_raster.elapsed_cycles);
+
+	for (;;)
+	{
+		while (state->debug_raster.active
+			&& state->debug_raster.cycles_until_event == 0)
+		{
+			if (DebugRasterProcessEvent(clownmdemu, &cpu_callback_user_data))
+			{
+				++*frames_completed;
+
+				if (remaining == 0)
+					return total_cycles;
+
+				DebugRasterInitialiseFrame(clownmdemu);
+				InitialiseDebugCPUCallbackUserData(
+					clownmdemu,
+					&cpu_callback_user_data,
+					0);
+			}
+		}
+
+		if (remaining == 0)
+			return total_cycles;
+
+		{
+			const cc_u32f chunk = CC_MIN(
+				remaining,
+				state->debug_raster.cycles_until_event);
+			const CycleMegaDrive target_cycle =
+				MakeCycleMegaDrive(state->debug_raster.elapsed_cycles + chunk);
+
+			SyncDebugStepDevices(&cpu_callback_user_data, target_cycle);
+
+			remaining -= chunk;
+			state->debug_raster.elapsed_cycles += chunk;
+			state->debug_raster.cycles_until_event -= chunk;
+		}
+	}
+}
+
+static void DebugRasterCompleteCurrentFrame(ClownMDEmu* const clownmdemu)
+{
+	ClownMDEmu_State* const state = &clownmdemu->state;
+	CPUCallbackUserData cpu_callback_user_data;
+
+	if (!state->debug_raster.active)
+		return;
+
+	InitialiseDebugCPUCallbackUserData(
+		clownmdemu,
+		&cpu_callback_user_data,
+		state->debug_raster.elapsed_cycles);
+
+	for (;;)
+	{
+		while (state->debug_raster.cycles_until_event == 0)
+		{
+			if (DebugRasterProcessEvent(clownmdemu, &cpu_callback_user_data))
+				return;
+		}
+
+		{
+			const cc_u32f chunk = state->debug_raster.cycles_until_event;
+			const CycleMegaDrive target_cycle =
+				MakeCycleMegaDrive(state->debug_raster.elapsed_cycles + chunk);
+
+			SyncDebugStepDevices(&cpu_callback_user_data, target_cycle);
+
+			state->debug_raster.elapsed_cycles += chunk;
+			state->debug_raster.cycles_until_event = 0;
+		}
+	}
+}
+
 ClownMDEmu_DebugStepResult ClownMDEmu_DebugStepM68kInstruction(ClownMDEmu* const clownmdemu)
 {
 	ClownMDEmu_DebugStepResult result;
-	CPUCallbackUserData cpu_callback_user_data;
 	cc_u32f cycles_available;
 	cc_u32f cycles_to_dma_end;
-	CycleMegaDrive target_cycle;
+	cc_u32f target_cycles;
 
 	result.status = CLOWNMDEMU_DEBUG_STEP_BLOCKED;
 	result.master_cycles = 0;
+	result.frames_completed = 0;
 
 	if (clownmdemu == NULL || clownmdemu->m68k.halted || clownmdemu->m68k.stopped)
 		return result;
-
-	InitialiseCPUCallbackUserData(clownmdemu, &cpu_callback_user_data);
 
 	cycles_available = clownmdemu->state.sync.m68k.cycles_available > 0
 		? (cc_u32f)clownmdemu->state.sync.m68k.cycles_available
@@ -300,30 +616,23 @@ ClownMDEmu_DebugStepResult ClownMDEmu_DebugStepM68kInstruction(ClownMDEmu* const
 		? clownmdemu->state.vdp_dma_transfer_countdown
 		: 0;
 
-	/*
-	   SyncM68k stores instruction overshoot in cycles_available. Advancing one
-	   cycle beyond the existing credit forces exactly one new 68000 instruction.
-	   If DMA currently owns the bus, include its remaining interval first.
-	*/
-	target_cycle = MakeCycleMegaDrive(cycles_available + cycles_to_dma_end + 1);
-	SyncM68k(clownmdemu, &cpu_callback_user_data, target_cycle);
-	SyncDebugStepDevices(&cpu_callback_user_data, target_cycle);
+	target_cycles = cycles_available + cycles_to_dma_end + 1;
+	DebugRasterAdvanceCycles(clownmdemu, target_cycles, &result.frames_completed);
 
 	result.status = CLOWNMDEMU_DEBUG_STEP_EXECUTED;
-	result.master_cycles = target_cycle.cycle;
+	result.master_cycles = target_cycles;
 	return result;
 }
 
 ClownMDEmu_DebugStepResult ClownMDEmu_DebugStepZ80Instruction(ClownMDEmu* const clownmdemu)
 {
 	ClownMDEmu_DebugStepResult result;
-	CPUCallbackUserData cpu_callback_user_data;
-	CycleMegaDrive target_cycle;
 	cc_u32f countdown;
-	cc_u8f i;
+	cc_u32f target_cycles;
 
 	result.status = CLOWNMDEMU_DEBUG_STEP_BLOCKED;
 	result.master_cycles = 0;
+	result.frames_completed = 0;
 
 	if (clownmdemu == NULL
 		|| clownmdemu->state.z80.bus_requested
@@ -331,33 +640,26 @@ ClownMDEmu_DebugStepResult ClownMDEmu_DebugStepZ80Instruction(ClownMDEmu* const 
 		|| clownmdemu->state.z80.frozen_by_dma_transfer)
 		return result;
 
-	InitialiseCPUCallbackUserData(clownmdemu, &cpu_callback_user_data);
-
-	/*
-	   The Z80 synchroniser keeps the remaining duration of the most recently
-	   executed instruction in cycle_countdown. Consuming that countdown reaches
-	   the next instruction boundary and executes exactly one new Z80 instruction.
-	*/
 	countdown = clownmdemu->state.z80.cycle_countdown;
-	target_cycle = MakeCycleMegaDrive(countdown == 0 ? 1 : countdown);
-	SyncZ80(clownmdemu, &cpu_callback_user_data, target_cycle);
-
-	/* The Z80 may access the 68000 bus, but standalone stepping must also bring
-	   the main CPU and the other continuously-clocked devices to the same time. */
-	SyncM68k(clownmdemu, &cpu_callback_user_data, target_cycle);
-	SyncFM(&cpu_callback_user_data, target_cycle);
-	SyncPSG(&cpu_callback_user_data, target_cycle);
-	for (i = 0; i < CC_COUNT_OF(cpu_callback_user_data.sync.io_ports); ++i)
-		SyncIOPort(&cpu_callback_user_data, target_cycle, i);
+	target_cycles = countdown == 0 ? 1 : countdown;
+	DebugRasterAdvanceCycles(clownmdemu, target_cycles, &result.frames_completed);
 
 	result.status = CLOWNMDEMU_DEBUG_STEP_EXECUTED;
-	result.master_cycles = target_cycle.cycle;
+	result.master_cycles = target_cycles;
 	return result;
 }
 
 void ClownMDEmu_Iterate(ClownMDEmu* const clownmdemu)
 {
 	ClownMDEmu_State* const state = &clownmdemu->state;
+
+	/* A normal run after debugger stepping completes the already-started frame
+	   rather than restarting the raster scheduler at V-Int. */
+	if (state->debug_raster.active)
+	{
+		DebugRasterCompleteCurrentFrame(clownmdemu);
+		return;
+	}
 
 	const cc_s16f television_vertical_resolution = GetTelevisionVerticalResolution(clownmdemu);
 	const cc_s16f console_vertical_resolution = VDP_GetScreenHeightInTiles(&clownmdemu->vdp.state) * VDP_STANDARD_TILE_HEIGHT;
