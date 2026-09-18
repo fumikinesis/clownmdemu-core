@@ -9,7 +9,21 @@
 
 static cc_u16f SyncZ80Callback(ClownMDEmu* const clownmdemu, void* const user_data)
 {
-	return CLOWNMDEMU_Z80_CLOCK_DIVIDER * ClownZ80_DoInstruction(&clownmdemu->z80, (const ClownZ80_ReadAndWriteCallbacks*)user_data);
+	const ClownZ80_ReadAndWriteCallbacks* const callbacks = (const ClownZ80_ReadAndWriteCallbacks*)user_data;
+	CPUCallbackUserData* const callback_user_data = (CPUCallbackUserData*)callbacks->user_data;
+	const ClownMDEmu_Callbacks* const frontend_callbacks = clownmdemu->callbacks;
+	const cc_u32f start_pc = clownmdemu->z80.program_counter;
+	cc_u16f cycles_done;
+
+	if (frontend_callbacks->debug_instruction != NULL)
+		frontend_callbacks->debug_instruction((void*)frontend_callbacks->user_data, CLOWNMDEMU_DEBUG_CPU_Z80, CLOWNMDEMU_DEBUG_INSTRUCTION_START, start_pc, start_pc, callback_user_data->sync.z80.current_cycle);
+
+	cycles_done = CLOWNMDEMU_Z80_CLOCK_DIVIDER * ClownZ80_DoInstruction(&clownmdemu->z80, callbacks);
+
+	if (frontend_callbacks->debug_instruction != NULL)
+		frontend_callbacks->debug_instruction((void*)frontend_callbacks->user_data, CLOWNMDEMU_DEBUG_CPU_Z80, CLOWNMDEMU_DEBUG_INSTRUCTION_END, start_pc, clownmdemu->z80.program_counter, callback_user_data->sync.z80.current_cycle + cycles_done);
+
+	return cycles_done;
 }
 
 static void Z80LogCallback(void* const user_data, const char* const format, ...)
@@ -119,8 +133,15 @@ cc_u16f Z80ReadCallbackWithCycle(const void* const user_data, const cc_u16f addr
 cc_u16f Z80ReadCallback(void* const user_data, const cc_u16f address)
 {
 	CPUCallbackUserData* const callback_user_data = (CPUCallbackUserData*)user_data;
+	ClownMDEmu* const clownmdemu = callback_user_data->clownmdemu;
+	const ClownMDEmu_Callbacks* const frontend_callbacks = clownmdemu->callbacks;
+	const CycleMegaDrive target_cycle = MakeCycleMegaDrive(callback_user_data->sync.z80.current_cycle);
+	const cc_u16f value = Z80ReadCallbackWithCycle(user_data, address, target_cycle);
 
-	return Z80ReadCallbackWithCycle(user_data, address, MakeCycleMegaDrive(callback_user_data->sync.z80.current_cycle));
+	if (frontend_callbacks->debug_memory_access != NULL)
+		frontend_callbacks->debug_memory_access((void*)frontend_callbacks->user_data, CLOWNMDEMU_DEBUG_CPU_Z80, CLOWNMDEMU_DEBUG_MEMORY_READ, address, 1, value & 0xFF, target_cycle.cycle);
+
+	return value;
 }
 
 static void M68kWriteByte(const void* const user_data, const cc_u32f address, const cc_u16f value, const CycleMegaDrive target_cycle)
@@ -212,6 +233,12 @@ void Z80WriteCallbackWithCycle(const void* const user_data, const cc_u16f addres
 void Z80WriteCallback(void* const user_data, const cc_u16f address, const cc_u16f value)
 {
 	CPUCallbackUserData* const callback_user_data = (CPUCallbackUserData*)user_data;
+	ClownMDEmu* const clownmdemu = callback_user_data->clownmdemu;
+	const ClownMDEmu_Callbacks* const frontend_callbacks = clownmdemu->callbacks;
+	const CycleMegaDrive target_cycle = MakeCycleMegaDrive(callback_user_data->sync.z80.current_cycle);
 
-	Z80WriteCallbackWithCycle(user_data, address, value, MakeCycleMegaDrive(callback_user_data->sync.z80.current_cycle));
+	Z80WriteCallbackWithCycle(user_data, address, value, target_cycle);
+
+	if (frontend_callbacks->debug_memory_access != NULL)
+		frontend_callbacks->debug_memory_access((void*)frontend_callbacks->user_data, CLOWNMDEMU_DEBUG_CPU_Z80, CLOWNMDEMU_DEBUG_MEMORY_WRITE, address, 1, value & 0xFF, target_cycle.cycle);
 }

@@ -265,13 +265,31 @@ static cc_u32f SyncM68kCallbackIterate(CPUCallbackUserData* const other_state, c
 	else
 	{
 		Clown68000_ReadWriteCallbacks m68k_read_write_callbacks;
+		const ClownMDEmu_Callbacks* const frontend_callbacks = clownmdemu->callbacks;
+		cc_u32f cycles_done;
+		cc_u32f start_pc;
+		cc_bool emit_instruction;
 
 		m68k_read_write_callbacks.read_callback = M68kReadCallback;
 		m68k_read_write_callbacks.write_callback = M68kWriteCallback;
 		m68k_read_write_callbacks.interrupt_acknowledge_callback = M68kInterruptAcknowledgeCallback;
 		m68k_read_write_callbacks.user_data = other_state;
 
-		return Clown68000_DoCycles(&clownmdemu->m68k, &m68k_read_write_callbacks, CC_DIVIDE_CEILING(total_cycles, CLOWNMDEMU_M68K_CLOCK_DIVIDER)) * CLOWNMDEMU_M68K_CLOCK_DIVIDER;
+		if (frontend_callbacks->debug_instruction == NULL)
+			return Clown68000_DoCycles(&clownmdemu->m68k, &m68k_read_write_callbacks, CC_DIVIDE_CEILING(total_cycles, CLOWNMDEMU_M68K_CLOCK_DIVIDER)) * CLOWNMDEMU_M68K_CLOCK_DIVIDER;
+
+		start_pc = clownmdemu->m68k.program_counter;
+		emit_instruction = !clownmdemu->m68k.halted && !clownmdemu->m68k.stopped;
+
+		if (emit_instruction)
+			frontend_callbacks->debug_instruction((void*)frontend_callbacks->user_data, CLOWNMDEMU_DEBUG_CPU_MAIN_M68K, CLOWNMDEMU_DEBUG_INSTRUCTION_START, start_pc, start_pc, other_state->sync.m68k.current_cycle);
+
+		cycles_done = Clown68000_DoCycles(&clownmdemu->m68k, &m68k_read_write_callbacks, 1) * CLOWNMDEMU_M68K_CLOCK_DIVIDER;
+
+		if (emit_instruction)
+			frontend_callbacks->debug_instruction((void*)frontend_callbacks->user_data, CLOWNMDEMU_DEBUG_CPU_MAIN_M68K, CLOWNMDEMU_DEBUG_INSTRUCTION_END, start_pc, clownmdemu->m68k.program_counter, other_state->sync.m68k.current_cycle + cycles_done);
+
+		return cycles_done;
 	}
 }
 
@@ -852,8 +870,34 @@ cc_u16f M68kReadCallbackWithCycle(const void* const user_data, const cc_u32f add
 cc_u16f M68kReadCallback(const void* const user_data, const cc_u32f address, const cc_bool do_high_byte, const cc_bool do_low_byte, const cc_u32f current_cycle, cc_bool* const terminate_early)
 {
 	CPUCallbackUserData* const callback_user_data = (CPUCallbackUserData*)user_data;
+	ClownMDEmu* const clownmdemu = callback_user_data->clownmdemu;
+	const ClownMDEmu_Callbacks* const frontend_callbacks = clownmdemu->callbacks;
+	const CycleMegaDrive target_cycle = MakeCycleMegaDrive(callback_user_data->sync.m68k.current_cycle + current_cycle * CLOWNMDEMU_M68K_CLOCK_DIVIDER);
+	const cc_u16f value = M68kReadCallbackWithCycleWithDMA(user_data, address, do_high_byte, do_low_byte, terminate_early, target_cycle, cc_false);
 
-	return M68kReadCallbackWithCycleWithDMA(user_data, address, do_high_byte, do_low_byte, terminate_early, MakeCycleMegaDrive(callback_user_data->sync.m68k.current_cycle + current_cycle * CLOWNMDEMU_M68K_CLOCK_DIVIDER), cc_false);
+	if (frontend_callbacks->debug_memory_access != NULL && (do_high_byte || do_low_byte))
+	{
+		cc_u32f byte_address = address * 2;
+		cc_u8f width;
+		cc_u32f observed_value;
+
+		if (do_high_byte && do_low_byte)
+		{
+			width = 2;
+			observed_value = value;
+		}
+		else
+		{
+			width = 1;
+			if (do_low_byte)
+				++byte_address;
+			observed_value = do_high_byte ? (value >> 8) & 0xFF : value & 0xFF;
+		}
+
+		frontend_callbacks->debug_memory_access((void*)frontend_callbacks->user_data, CLOWNMDEMU_DEBUG_CPU_MAIN_M68K, CLOWNMDEMU_DEBUG_MEMORY_READ, byte_address, width, observed_value, target_cycle.cycle);
+	}
+
+	return value;
 }
 
 void M68kWriteCallbackWithCycle(const void* const user_data, const cc_u32f address_word, const cc_bool do_high_byte, const cc_bool do_low_byte, cc_bool* const terminate_early, const cc_u16f value, const CycleMegaDrive target_cycle)
@@ -1340,6 +1384,31 @@ void M68kWriteCallbackWithCycle(const void* const user_data, const cc_u32f addre
 void M68kWriteCallback(const void* const user_data, const cc_u32f address, const cc_bool do_high_byte, const cc_bool do_low_byte, const cc_u32f current_cycle, cc_bool* const terminate_early, const cc_u16f value)
 {
 	CPUCallbackUserData* const callback_user_data = (CPUCallbackUserData*)user_data;
+	ClownMDEmu* const clownmdemu = callback_user_data->clownmdemu;
+	const ClownMDEmu_Callbacks* const frontend_callbacks = clownmdemu->callbacks;
+	const CycleMegaDrive target_cycle = MakeCycleMegaDrive(callback_user_data->sync.m68k.current_cycle + current_cycle * CLOWNMDEMU_M68K_CLOCK_DIVIDER);
 
-	M68kWriteCallbackWithCycle(user_data, address, do_high_byte, do_low_byte, terminate_early, value, MakeCycleMegaDrive(callback_user_data->sync.m68k.current_cycle + current_cycle * CLOWNMDEMU_M68K_CLOCK_DIVIDER));
+	M68kWriteCallbackWithCycle(user_data, address, do_high_byte, do_low_byte, terminate_early, value, target_cycle);
+
+	if (frontend_callbacks->debug_memory_access != NULL && (do_high_byte || do_low_byte))
+	{
+		cc_u32f byte_address = address * 2;
+		cc_u8f width;
+		cc_u32f observed_value;
+
+		if (do_high_byte && do_low_byte)
+		{
+			width = 2;
+			observed_value = value;
+		}
+		else
+		{
+			width = 1;
+			if (do_low_byte)
+				++byte_address;
+			observed_value = do_high_byte ? (value >> 8) & 0xFF : value & 0xFF;
+		}
+
+		frontend_callbacks->debug_memory_access((void*)frontend_callbacks->user_data, CLOWNMDEMU_DEBUG_CPU_MAIN_M68K, CLOWNMDEMU_DEBUG_MEMORY_WRITE, byte_address, width, observed_value, target_cycle.cycle);
+	}
 }

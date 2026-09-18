@@ -113,6 +113,25 @@ typedef enum ClownMDEmu_SoundChip
 	CLOWNMDEMU_SOUND_CHIP_PSG       /* SN76489 */
 } ClownMDEmu_SoundChip;
 
+typedef enum ClownMDEmu_DebugCPU
+{
+	CLOWNMDEMU_DEBUG_CPU_MAIN_M68K,
+	CLOWNMDEMU_DEBUG_CPU_Z80,
+	CLOWNMDEMU_DEBUG_CPU_MCD_M68K
+} ClownMDEmu_DebugCPU;
+
+typedef enum ClownMDEmu_DebugInstructionPhase
+{
+	CLOWNMDEMU_DEBUG_INSTRUCTION_START,
+	CLOWNMDEMU_DEBUG_INSTRUCTION_END
+} ClownMDEmu_DebugInstructionPhase;
+
+typedef enum ClownMDEmu_DebugMemoryAccess
+{
+	CLOWNMDEMU_DEBUG_MEMORY_READ,
+	CLOWNMDEMU_DEBUG_MEMORY_WRITE
+} ClownMDEmu_DebugMemoryAccess;
+
 /* TODO: Move this (and the other CDD logic) to its own 'cdd.c'/'cdd.h' file. */
 typedef struct ClownMDEmu_MCDCDDState
 {
@@ -280,6 +299,10 @@ typedef struct ClownMDEmu_Callbacks
 
 	/* May be NULL. */
 	void (*sound_chip_written)(void *user_data, ClownMDEmu_SoundChip chip, cc_u8f address, cc_u8f data, cc_u32f cycle);
+
+	/* Optional debugger/instrumentation hooks. */
+	void (*debug_instruction)(void *user_data, ClownMDEmu_DebugCPU cpu, ClownMDEmu_DebugInstructionPhase phase, cc_u32f pc, cc_u32f next_pc, cc_u32f cycle);
+	void (*debug_memory_access)(void *user_data, ClownMDEmu_DebugCPU cpu, ClownMDEmu_DebugMemoryAccess access, cc_u32f address, cc_u8f width, cc_u32f value, cc_u32f cycle);
 } ClownMDEmu_Callbacks;
 
 typedef struct ClownMDEmu
