@@ -1127,6 +1127,16 @@ void M68kWriteCallbackWithCycle(const void* const user_data, const cc_u32f addre
 						{
 							const cc_bool bus_request = (high_byte & 1) != 0;
 
+							if (frontend_callbacks->debug_hardware_write != NULL)
+								frontend_callbacks->debug_hardware_write(
+									(void*)frontend_callbacks->user_data,
+									CLOWNMDEMU_DEBUG_CPU_MAIN_M68K,
+									CLOWNMDEMU_DEBUG_HARDWARE_Z80_BUS_REQUEST,
+									0,
+									1,
+									bus_request ? 1 : 0,
+									target_cycle.cycle);
+
 							if (clownmdemu->state.z80.bus_requested != bus_request)
 								SyncZ80(clownmdemu, callback_user_data, target_cycle);
 
@@ -1139,6 +1149,16 @@ void M68kWriteCallbackWithCycle(const void* const user_data, const cc_u32f addre
 						if (do_high_byte)
 						{
 							const cc_bool new_reset_held = (high_byte & 1) == 0;
+
+							if (frontend_callbacks->debug_hardware_write != NULL)
+								frontend_callbacks->debug_hardware_write(
+									(void*)frontend_callbacks->user_data,
+									CLOWNMDEMU_DEBUG_CPU_MAIN_M68K,
+									CLOWNMDEMU_DEBUG_HARDWARE_Z80_RESET,
+									0,
+									1,
+									new_reset_held ? 1 : 0,
+									target_cycle.cycle);
 
 							if (clownmdemu->state.z80.reset_held && !new_reset_held)
 							{
@@ -1323,12 +1343,59 @@ void M68kWriteCallbackWithCycle(const void* const user_data, const cc_u32f addre
 				case 0 / 2:
 				case 2 / 2:
 					/* VDP data port */
+					if (frontend_callbacks->debug_hardware_write != NULL && (clownmdemu->vdp.state.access.code_register & 1) != 0)
+					{
+						ClownMDEmu_DebugHardwareTarget target;
+						cc_bool valid_target = cc_true;
+
+						switch (clownmdemu->vdp.state.access.selected_buffer)
+						{
+							case VDP_ACCESS_VRAM:
+								target = CLOWNMDEMU_DEBUG_HARDWARE_VDP_VRAM;
+								break;
+							case VDP_ACCESS_CRAM:
+								target = CLOWNMDEMU_DEBUG_HARDWARE_VDP_CRAM;
+								break;
+							case VDP_ACCESS_VSRAM:
+								target = CLOWNMDEMU_DEBUG_HARDWARE_VDP_VSRAM;
+								break;
+							default:
+								valid_target = cc_false;
+								target = CLOWNMDEMU_DEBUG_HARDWARE_VDP_VRAM;
+								break;
+						}
+
+						if (valid_target)
+							frontend_callbacks->debug_hardware_write(
+								(void*)frontend_callbacks->user_data,
+								CLOWNMDEMU_DEBUG_CPU_MAIN_M68K,
+								target,
+								clownmdemu->vdp.state.access.address_register,
+								2,
+								value,
+								target_cycle.cycle);
+					}
+
 					VDP_WriteData(&clownmdemu->vdp, value, frontend_callbacks->colour_updated, frontend_callbacks->user_data);
 					break;
 
 				case 4 / 2:
 				case 6 / 2:
 					/* VDP control port */
+					if (frontend_callbacks->debug_hardware_write != NULL
+						&& !clownmdemu->vdp.state.access.write_pending
+						&& (value & 0xC000) == 0x8000)
+					{
+						frontend_callbacks->debug_hardware_write(
+							(void*)frontend_callbacks->user_data,
+							CLOWNMDEMU_DEBUG_CPU_MAIN_M68K,
+							CLOWNMDEMU_DEBUG_HARDWARE_VDP_REGISTER,
+							(value >> 8) & 0x1F,
+							1,
+							value & 0xFF,
+							target_cycle.cycle);
+					}
+
 					VDP_WriteControl(&clownmdemu->vdp, value, frontend_callbacks->colour_updated, frontend_callbacks->user_data, VDPDMATransferBeginCallback, VDPReadCallback, callback_user_data, VDPKDebugCallback, NULL, target_cycle.cycle);
 
 					/* TODO: This should be done more faithfully once the CPU interpreters are bus-event-oriented. */
@@ -1351,6 +1418,16 @@ void M68kWriteCallbackWithCycle(const void* const user_data, const cc_u32f addre
 
 						/* Alter the PSG's state */
 						PSG_DoCommand(&clownmdemu->psg, low_byte);
+
+						if (frontend_callbacks->debug_hardware_write != NULL)
+							frontend_callbacks->debug_hardware_write(
+								(void*)frontend_callbacks->user_data,
+								CLOWNMDEMU_DEBUG_CPU_MAIN_M68K,
+								CLOWNMDEMU_DEBUG_HARDWARE_PSG,
+								0,
+								1,
+								low_byte,
+								target_cycle.cycle);
 
 						/* Notify the frontend of the write. */
 						if (frontend_callbacks->sound_chip_written != NULL)

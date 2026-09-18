@@ -132,6 +132,18 @@ typedef enum ClownMDEmu_DebugMemoryAccess
 	CLOWNMDEMU_DEBUG_MEMORY_WRITE
 } ClownMDEmu_DebugMemoryAccess;
 
+typedef enum ClownMDEmu_DebugHardwareTarget
+{
+	CLOWNMDEMU_DEBUG_HARDWARE_VDP_VRAM,
+	CLOWNMDEMU_DEBUG_HARDWARE_VDP_CRAM,
+	CLOWNMDEMU_DEBUG_HARDWARE_VDP_VSRAM,
+	CLOWNMDEMU_DEBUG_HARDWARE_VDP_REGISTER,
+	CLOWNMDEMU_DEBUG_HARDWARE_YM2612,
+	CLOWNMDEMU_DEBUG_HARDWARE_PSG,
+	CLOWNMDEMU_DEBUG_HARDWARE_Z80_BUS_REQUEST,
+	CLOWNMDEMU_DEBUG_HARDWARE_Z80_RESET
+} ClownMDEmu_DebugHardwareTarget;
+
 typedef enum ClownMDEmu_DebugStepStatus
 {
 	CLOWNMDEMU_DEBUG_STEP_EXECUTED,
@@ -315,6 +327,7 @@ typedef struct ClownMDEmu_Callbacks
 	/* Optional debugger/instrumentation hooks. */
 	void (*debug_instruction)(void *user_data, ClownMDEmu_DebugCPU cpu, ClownMDEmu_DebugInstructionPhase phase, cc_u32f pc, cc_u32f next_pc, cc_u32f cycle);
 	void (*debug_memory_access)(void *user_data, ClownMDEmu_DebugCPU cpu, ClownMDEmu_DebugMemoryAccess access, cc_u32f address, cc_u8f width, cc_u32f value, cc_u32f cycle);
+	void (*debug_hardware_write)(void *user_data, ClownMDEmu_DebugCPU cpu, ClownMDEmu_DebugHardwareTarget target, cc_u32f address, cc_u8f width, cc_u32f value, cc_u32f cycle);
 } ClownMDEmu_Callbacks;
 
 typedef struct ClownMDEmu

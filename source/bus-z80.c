@@ -184,6 +184,16 @@ void Z80WriteCallbackWithCycle(const void* const user_data, const cc_u16f addres
 			{
 				FM_DoData(&clownmdemu->fm, value);
 
+				if (clownmdemu->callbacks->debug_hardware_write != NULL)
+					clownmdemu->callbacks->debug_hardware_write(
+						(void*)clownmdemu->callbacks->user_data,
+						CLOWNMDEMU_DEBUG_CPU_Z80,
+						CLOWNMDEMU_DEBUG_HARDWARE_YM2612,
+						clownmdemu->fm.state.address,
+						1,
+						value,
+						target_cycle.cycle);
+
 				/* Notify the frontend of the write. */
 				if (clownmdemu->callbacks->sound_chip_written != NULL)
 					clownmdemu->callbacks->sound_chip_written((void*)clownmdemu->callbacks->user_data, clownmdemu->fm.state.port == 0 ? CLOWNMDEMU_SOUND_CHIP_FM_PORT0 : CLOWNMDEMU_SOUND_CHIP_FM_PORT1, clownmdemu->fm.state.address, value, target_cycle.cycle);
