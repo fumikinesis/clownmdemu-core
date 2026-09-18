@@ -244,6 +244,117 @@ Analog screen sections in relation to VCounter:
 -------------------------------------------------------------------------------------------
 */
 
+static void InitialiseCPUCallbackUserData(ClownMDEmu* const clownmdemu, CPUCallbackUserData* const cpu_callback_user_data)
+{
+	ClownMDEmu_State* const state = &clownmdemu->state;
+	cc_u8f i;
+
+	cpu_callback_user_data->clownmdemu = clownmdemu;
+	Sync_Temporary_Initialise(&cpu_callback_user_data->sync.m68k);
+	cpu_callback_user_data->sync.z80.current_cycle = 0;
+	/* TODO: This is awful; stop doing this. */
+	cpu_callback_user_data->sync.z80.cycle_countdown = &state->z80.cycle_countdown;
+	Sync_Temporary_Initialise(&cpu_callback_user_data->sync.mcd_m68k);
+	cpu_callback_user_data->sync.mcd_m68k_irq3.current_cycle = 0;
+	cpu_callback_user_data->sync.mcd_m68k_irq3.cycle_countdown = &state->mega_cd.irq.irq3_countdown;
+	cpu_callback_user_data->sync.vdp_dma_transfer.current_cycle = 0;
+	cpu_callback_user_data->sync.vdp_dma_transfer.cycle_countdown = &state->vdp_dma_transfer_countdown;
+	cpu_callback_user_data->sync.fm.current_cycle = 0;
+	cpu_callback_user_data->sync.psg.current_cycle = 0;
+	cpu_callback_user_data->sync.pcm.current_cycle = 0;
+	for (i = 0; i < CC_COUNT_OF(cpu_callback_user_data->sync.io_ports); ++i)
+		cpu_callback_user_data->sync.io_ports[i].current_cycle = 0;
+}
+
+static void SyncDebugStepDevices(CPUCallbackUserData* const cpu_callback_user_data, const CycleMegaDrive target_cycle)
+{
+	cc_u8f i;
+
+	SyncZ80(cpu_callback_user_data->clownmdemu, cpu_callback_user_data, target_cycle);
+	SyncFM(cpu_callback_user_data, target_cycle);
+	SyncPSG(cpu_callback_user_data, target_cycle);
+	for (i = 0; i < CC_COUNT_OF(cpu_callback_user_data->sync.io_ports); ++i)
+		SyncIOPort(cpu_callback_user_data, target_cycle, i);
+}
+
+ClownMDEmu_DebugStepResult ClownMDEmu_DebugStepM68kInstruction(ClownMDEmu* const clownmdemu)
+{
+	ClownMDEmu_DebugStepResult result;
+	CPUCallbackUserData cpu_callback_user_data;
+	cc_u32f cycles_available;
+	cc_u32f cycles_to_dma_end;
+	CycleMegaDrive target_cycle;
+
+	result.status = CLOWNMDEMU_DEBUG_STEP_BLOCKED;
+	result.master_cycles = 0;
+
+	if (clownmdemu == NULL || clownmdemu->m68k.halted || clownmdemu->m68k.stopped)
+		return result;
+
+	InitialiseCPUCallbackUserData(clownmdemu, &cpu_callback_user_data);
+
+	cycles_available = clownmdemu->state.sync.m68k.cycles_available > 0
+		? (cc_u32f)clownmdemu->state.sync.m68k.cycles_available
+		: 0;
+	cycles_to_dma_end = clownmdemu->state.m68k.frozen_by_dma_transfer
+		? clownmdemu->state.vdp_dma_transfer_countdown
+		: 0;
+
+	/*
+	   SyncM68k stores instruction overshoot in cycles_available. Advancing one
+	   cycle beyond the existing credit forces exactly one new 68000 instruction.
+	   If DMA currently owns the bus, include its remaining interval first.
+	*/
+	target_cycle = MakeCycleMegaDrive(cycles_available + cycles_to_dma_end + 1);
+	SyncM68k(clownmdemu, &cpu_callback_user_data, target_cycle);
+	SyncDebugStepDevices(&cpu_callback_user_data, target_cycle);
+
+	result.status = CLOWNMDEMU_DEBUG_STEP_EXECUTED;
+	result.master_cycles = target_cycle.cycle;
+	return result;
+}
+
+ClownMDEmu_DebugStepResult ClownMDEmu_DebugStepZ80Instruction(ClownMDEmu* const clownmdemu)
+{
+	ClownMDEmu_DebugStepResult result;
+	CPUCallbackUserData cpu_callback_user_data;
+	CycleMegaDrive target_cycle;
+	cc_u32f countdown;
+	cc_u8f i;
+
+	result.status = CLOWNMDEMU_DEBUG_STEP_BLOCKED;
+	result.master_cycles = 0;
+
+	if (clownmdemu == NULL
+		|| clownmdemu->state.z80.bus_requested
+		|| clownmdemu->state.z80.reset_held
+		|| clownmdemu->state.z80.frozen_by_dma_transfer)
+		return result;
+
+	InitialiseCPUCallbackUserData(clownmdemu, &cpu_callback_user_data);
+
+	/*
+	   The Z80 synchroniser keeps the remaining duration of the most recently
+	   executed instruction in cycle_countdown. Consuming that countdown reaches
+	   the next instruction boundary and executes exactly one new Z80 instruction.
+	*/
+	countdown = clownmdemu->state.z80.cycle_countdown;
+	target_cycle = MakeCycleMegaDrive(countdown == 0 ? 1 : countdown);
+	SyncZ80(clownmdemu, &cpu_callback_user_data, target_cycle);
+
+	/* The Z80 may access the 68000 bus, but standalone stepping must also bring
+	   the main CPU and the other continuously-clocked devices to the same time. */
+	SyncM68k(clownmdemu, &cpu_callback_user_data, target_cycle);
+	SyncFM(&cpu_callback_user_data, target_cycle);
+	SyncPSG(&cpu_callback_user_data, target_cycle);
+	for (i = 0; i < CC_COUNT_OF(cpu_callback_user_data.sync.io_ports); ++i)
+		SyncIOPort(&cpu_callback_user_data, target_cycle, i);
+
+	result.status = CLOWNMDEMU_DEBUG_STEP_EXECUTED;
+	result.master_cycles = target_cycle.cycle;
+	return result;
+}
+
 void ClownMDEmu_Iterate(ClownMDEmu* const clownmdemu)
 {
 	ClownMDEmu_State* const state = &clownmdemu->state;
@@ -261,21 +372,7 @@ void ClownMDEmu_Iterate(ClownMDEmu* const clownmdemu)
 	cc_u8f h_int_counter;
 	cc_u8f i;
 
-	cpu_callback_user_data.clownmdemu = clownmdemu;
-	Sync_Temporary_Initialise(&cpu_callback_user_data.sync.m68k);
-	cpu_callback_user_data.sync.z80.current_cycle = 0;
-	/* TODO: This is awful; stop doing this. */
-	cpu_callback_user_data.sync.z80.cycle_countdown = &state->z80.cycle_countdown;
-	Sync_Temporary_Initialise(&cpu_callback_user_data.sync.mcd_m68k);
-	cpu_callback_user_data.sync.mcd_m68k_irq3.current_cycle = 0;
-	cpu_callback_user_data.sync.mcd_m68k_irq3.cycle_countdown = &state->mega_cd.irq.irq3_countdown;
-	cpu_callback_user_data.sync.vdp_dma_transfer.current_cycle = 0;
-	cpu_callback_user_data.sync.vdp_dma_transfer.cycle_countdown = &state->vdp_dma_transfer_countdown;
-	cpu_callback_user_data.sync.fm.current_cycle = 0;
-	cpu_callback_user_data.sync.psg.current_cycle = 0;
-	cpu_callback_user_data.sync.pcm.current_cycle = 0;
-	for (i = 0; i < CC_COUNT_OF(cpu_callback_user_data.sync.io_ports); ++i)
-		cpu_callback_user_data.sync.io_ports[i].current_cycle = 0;
+	InitialiseCPUCallbackUserData(clownmdemu, &cpu_callback_user_data);
 
 	/* We start at V-Int, to minimise input latency (games tend to read the control pads during V-Int). */
 	scanline = console_vertical_resolution;

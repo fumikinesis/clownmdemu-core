@@ -132,6 +132,18 @@ typedef enum ClownMDEmu_DebugMemoryAccess
 	CLOWNMDEMU_DEBUG_MEMORY_WRITE
 } ClownMDEmu_DebugMemoryAccess;
 
+typedef enum ClownMDEmu_DebugStepStatus
+{
+	CLOWNMDEMU_DEBUG_STEP_EXECUTED,
+	CLOWNMDEMU_DEBUG_STEP_BLOCKED
+} ClownMDEmu_DebugStepStatus;
+
+typedef struct ClownMDEmu_DebugStepResult
+{
+	ClownMDEmu_DebugStepStatus status;
+	cc_u32l master_cycles;
+} ClownMDEmu_DebugStepResult;
+
 /* TODO: Move this (and the other CDD logic) to its own 'cdd.c'/'cdd.h' file. */
 typedef struct ClownMDEmu_MCDCDDState
 {
@@ -340,6 +352,8 @@ void ClownMDEmu_Iterate(ClownMDEmu *clownmdemu);
 void ClownMDEmu_SetCartridge(ClownMDEmu *clownmdemu, const cc_u16l *buffer, cc_u32f buffer_length);
 void ClownMDEmu_SoftReset(ClownMDEmu *clownmdemu, cc_bool cartridge_inserted, cc_bool cd_inserted);
 void ClownMDEmu_HardReset(ClownMDEmu *clownmdemu, cc_bool cartridge_inserted, cc_bool cd_inserted);
+ClownMDEmu_DebugStepResult ClownMDEmu_DebugStepM68kInstruction(ClownMDEmu *clownmdemu);
+ClownMDEmu_DebugStepResult ClownMDEmu_DebugStepZ80Instruction(ClownMDEmu *clownmdemu);
 void ClownMDEmu_SetLogCallback(const ClownMDEmu_LogCallback log_callback, const void *user_data);
 
 typedef struct ClownMDEmu_StateBackup
